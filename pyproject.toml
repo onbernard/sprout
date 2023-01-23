@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "sprout"
+version = "0.1.0"
+description = "Another async task queue"
+authors = ["onbernard <emiseno97@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+Cython = "^0.29.33"
+pydantic = "^1.10.4"
+fastapi = "^0.89.1"
+uvicorn = {extras = ["standard"], version = "^0.20.0"}
+redis = "^4.4.2"
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.20.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
