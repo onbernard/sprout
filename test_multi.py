@@ -1,15 +1,9 @@
-import time
+from src.future import FutureModel, Arguments
+from src.task import Task
+from pydantic import BaseModel
+from redis.asyncio import Redis
 
-from src.sprout import Sprout
+def afunc(a:int):
+    return 1
 
-
-app = Sprout()
-
-@app.task(n_worker=2)
-def test(x: int):
-    time.sleep(x)
-    return x
-
-if __name__=="__main__":
-    app.start()
-    test(x=1)
+task = Task(Redis(), afunc, "uwu")
