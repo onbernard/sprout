@@ -115,3 +115,10 @@ class AsyncRedisStream:
 
     async def ack(self, groupname: str, *ids: bytes):
         await self.db.xack(self.key, groupname, *ids)
+
+    async def range(self, min: str = "-", max: str = "+") -> List[Tuple[bytes, BaseModel]]:
+        return [(index, self.model.parse_raw(msg[b"val"])) for index, msg in await self.db.xrange(
+            name = self.key,
+            min = min,
+            max = max
+        )]

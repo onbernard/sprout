@@ -1,16 +1,8 @@
-import inspect
-import sys
-import os
 from uuid import UUID, uuid4
 from typing import Callable, Optional, Dict, ClassVar, Any, List, Literal, get_type_hints, Type, Tuple, Union
 from functools import wraps, cached_property
-from concurrent.futures.process import ProcessPoolExecutor
-from multiprocessing import Process, Queue
 
 import redis
-from fastapi import FastAPI, BackgroundTasks
-from pydantic import BaseModel, validator, create_model
-from pydantic.decorator import ValidatedFunction
 
 from src.utils.stream import RedisStream
 
@@ -141,17 +133,6 @@ class Task:
         try:
             return future.parse_raw(self.db.get(future.key))
         except:
-            return None
-
-
-class Future(BaseModel):
-    status: Literal["pending", "completed"] = "pending"
-    kwargs: Dict[str, Union[BaseModel, Any]]
-    result: Optional[Any] = None
-    key: Optional[str] = None
-
-    @validator("key", pre=True, always=True)
-    def set_key(cls, v):
-        return v or f"_sprout:future:{uuid4().hex}"
+            return Noned
 
 

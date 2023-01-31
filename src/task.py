@@ -50,8 +50,11 @@ class Task:
         self.validate_arguments(args, kwargs)
         arguments = Arguments(args=args, kwargs=kwargs)
         future = FutureModel(arguments=arguments)
-        await self.db.set(future.key(self.name), future.json())
-        return await self.pending_stream.push(StreamItem(key=future.key(self.name)))
+        if await self.db.setnx(future.key(self.name), future.json()):
+            await self.pending_stream.push(StreamItem(key=future.key(self.name)))
+        else:
+            future = FutureModel.parse_raw(await self.db.get(future.key(self.name)))
+        return future
 
     async def consumer(self, consumername: Optional[str] = None):
         consumername = consumername or f"_consumer:{uuid4().hex}"
@@ -74,8 +77,21 @@ class Task:
                 await self.db.set(future.key(self.name), future.json())
                 yield future
 
+    async def run(self):
+        async for future in self.consumer():
+            print(future)
+
     async def resolve(self, future: FutureModel):
-        try:
-            return await FutureModel.parse_raw(self.db.get(future.key(self.name)))
-        except:
-            return None
+        return FutureModel.parse_raw(await self.db.get(future.key(self.name)))
+
+    async def all(self):
+        for idx, item in await self.pending_stream.range():
+            yield FutureModel.parse_raw(await self.db.get(item.key))
+
+    async def completed(self):
+        for idx, item in await self.completed_stream.range():
+            yield FutureModel.parse_raw(await self.db.get(item.key))
+
+    async def failed(self):
+        for idx, item in await self.failed_stream.range():
+            yield FutureModel.parse_raw(await self.db.get(item.key))

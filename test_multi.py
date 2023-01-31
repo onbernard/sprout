@@ -1,9 +1,18 @@
-from src.future import FutureModel, Arguments
-from src.task import Task
-from pydantic import BaseModel
-from redis.asyncio import Redis
+from src.async_sprout import Sprout
 
+app = Sprout()
+
+@app.task()
 def afunc(a:int):
-    return 1
+    return a*2
 
-task = Task(Redis(), afunc, "uwu")
+@app.task()
+def anotherfunc(a:str = "uwu"):
+    return a*2
+
+@app.task()
+def fails():
+    raise Exception("lol")
+
+if __name__=="__main__":
+    app()
