@@ -3,7 +3,7 @@ import asyncio
 
 import redis.asyncio as redis
 
-from src.task import Task
+from sprout.task import Task
 
 class Sprout:
     def __init__(self, host: str = "localhost", port: int = 6379) -> None:

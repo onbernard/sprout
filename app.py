@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 
 from test_multi import app, afunc, anotherfunc, fails
-from src.future import FutureModel
+from sprout.future import FutureModel
 
 app = FastAPI()
 

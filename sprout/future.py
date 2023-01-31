@@ -1,10 +1,10 @@
-from typing import Any, Literal, Hashable, Dict, Tuple, Callable, Optional, Type
+from typing import Any, Literal, Hashable, Dict, Tuple, Callable, Optional, Type, Generic, TypeVar, get_type_hints
 from uuid import UUID, uuid4
 from collections import namedtuple
 from hashlib import md5
-import inspect
 
-from pydantic import BaseModel, validator
+from pydantic import BaseModel
+from pydantic.generics import GenericModel
 from pydantic.decorator import ValidatedFunction
 
 class Kwargs(dict):
@@ -42,3 +42,16 @@ class FutureModel(BaseModel):
 
     def key(self, mixin: str) -> str:
         return f"_future:{mixin}:{self.arguments.hash()}"
+
+
+def create_model_from_signature(func: Callable):
+    validated_function = ValidatedFunction(func, None)
+    argT = validated_function.model
+    retT = Optional[get_type_hints(func).get("return")] or Any
+    class CustomFuture(BaseModel):
+        arguments: argT
+        result: retT = None
+        status: Literal["pending", "completed", "failed"] = "pending"
+        def key(self, mixin: str) -> str:
+            return f"_future:{mixin}:{md5(self.arguments.json().encode()).hexdigest()}"
+    return CustomFuture

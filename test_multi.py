@@ -1,10 +1,15 @@
-from src.async_sprout import Sprout
+from sprout.sprout import Sprout
+from pydantic import BaseModel
+
+class Request(BaseModel):
+    file: str = "fsq/fsq/fqsss"
 
 app = Sprout()
 
 @app.task()
-def afunc(a:int):
-    return a*2
+def afunc(a:Request) -> str:
+    print(a)
+    return a.file+"uwu"
 
 @app.task()
 def anotherfunc(a:str = "uwu"):
