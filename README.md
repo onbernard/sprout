@@ -20,3 +20,5 @@ Another stupid library named after a vegetable.
 - Javascript w/ SSE
 - Monitoring & CLI
 - In memory, on disk memory
+- Add proper tests
+- Add generic typing
