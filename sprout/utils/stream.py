@@ -51,11 +51,11 @@ class RedisStream:
 
 
 class AsyncRedisStream:
-    def __init__(self, db: aioredis.Redis, model: Type[BaseModel], suffix: Optional[str] = None):
+    def __init__(self, db: aioredis.Redis, model: Type[BaseModel], prefix: str, suffix: Optional[str] = None):
         self.db = db
         self.model = model
         suffix = suffix or uuid4().hex
-        self.key = f"_stream:{suffix}"
+        self.key = f"{prefix}:stream:{suffix}"
 
     async def iter(self, count: int = 1, block: int = 0, last_seen: Optional[str] = None):
         last_seen = last_seen or "0"

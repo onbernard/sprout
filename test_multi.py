@@ -19,5 +19,13 @@ def anotherfunc(a:str = "uwu"):
 def fails():
     raise Exception("lol")
 
+
+@app.task()
+def infinite(what:str):
+    i = 0
+    while True:
+        yield f"{what} {i}"
+        i += 1
+
 if __name__=="__main__":
     app()

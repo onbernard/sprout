@@ -9,11 +9,11 @@ readme = "README.md"
 python = "^3.9"
 Cython = "^0.29.33"
 pydantic = "^1.10.4"
-fastapi = "^0.89.1"
-uvicorn = {extras = ["standard"], version = "^0.20.0"}
 redis = "^4.4.2"
 
 [tool.poetry.group.dev.dependencies]
+fastapi = "^0.89.1"
+uvicorn = {extras = ["standard"], version = "^0.20.0"}
 ipykernel = "^6.20.2"
 
 [build-system]
