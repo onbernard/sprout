@@ -32,4 +32,5 @@ class Sprout:
         )
 
     def __call__(self, *args: Any, **kwds: Any) -> Any:
+        print(f"Starting {len(self.task_index)} tasks: \n{'\n'.join(t.name for t in self.task_index)}")
         asyncio.run(self.run())

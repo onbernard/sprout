@@ -76,6 +76,7 @@ class Task:
             for idx, item in event:
                 future = FutureModel.parse_raw(await self.db.get(item.key))
                 m = self.validated_func.init_model_instance(**future.arguments.kwargs)
+                print(f"Consumer {self.name}-{consumername:5.5} got {future.arguments}")
                 try:
                     res = self.validated_func.execute(m)
                 except Exception as exc:
