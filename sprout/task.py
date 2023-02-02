@@ -6,7 +6,7 @@ from pydantic import BaseModel, validator, ValidationError
 from pydantic.decorator import ValidatedFunction
 
 from .future import Arguments, FutureModel, create_model_from_signature
-from .utils.stream import AsyncRedisStream
+from .utils.stream import AsyncRedisStream, watch_stream
 
 
 class StreamItem(BaseModel):
@@ -30,6 +30,12 @@ class Task:
             model = StreamItem,
             prefix = prefix,
             suffix = f"{name}:pending"
+        )
+        self.inprogress_stream = AsyncRedisStream(
+            db = self.db,
+            model = StreamItem,
+            prefix = prefix,
+            suffix = f"{name}:inprogress"
         )
         self.failed_stream = AsyncRedisStream(
             db = self.db,
@@ -75,8 +81,11 @@ class Task:
         async for event in self.pending_stream.iter_group(groupname, consumername):
             for idx, item in event:
                 future = FutureModel.parse_raw(await self.db.get(item.key))
+                future.status = "inprogress"
+                await self.db.set(future.key(self.name), future.json())
+                await self.inprogress_stream.push(item)
                 m = self.validated_func.init_model_instance(**future.arguments.kwargs)
-                print(f"Consumer {self.name}-{consumername:5.5} got {future.arguments}")
+                print(f"Consumer {self.name}-{consumername} got {future.arguments}")
                 try:
                     res = self.validated_func.execute(m)
                 except Exception as exc:
@@ -84,6 +93,7 @@ class Task:
                     future.status = "failed"
                     await self.failed_stream.push(item)
                 else:
+                    print(f"Consumer {self.name}-{consumername} with {future.arguments} completed task")
                     future.status = "completed"
                     future.result = res
                     await self.completed_stream.push(item)
@@ -93,7 +103,7 @@ class Task:
 
     async def run(self):
         async for future in self.consumer():
-            print(future)
+            ...
 
     async def resolve(self, future: FutureModel) -> FutureModel:
         return FutureModel.parse_raw(await self.db.get(future.key(self.name)))
@@ -113,6 +123,9 @@ class Task:
         for idx, item in await self.failed_stream.range():
             yield FutureModel.parse_raw(await self.db.get(item.key))
 
+    async def monitor(self):
+        async for stream, item in watch_stream(self.pending_stream, self.inprogress_stream, self.completed_stream, self.failed_stream):
+            yield (stream.key, item)
 
 
 class GeneratorTask(Task):
@@ -125,10 +138,14 @@ class GeneratorTask(Task):
             for idx, item in event:
                 future = FutureModel.parse_raw(await self.db.get(item.key))
                 m = self.validated_func.init_model_instance(**future.arguments.kwargs)
+                future.status = "inprogress"
+                await self.db.set(future.key(self.name), future.json())
+                await self.inprogress_stream.push(item)
                 try:
                     for res in self.validated_func.execute(m):
                         future.result = res
                         await self.db.set(future.key(self.name), future.json())
+                        await self.inprogress_stream.push(item)
                 except Exception as exc:
                     print(str(exc.with_traceback()))
                     future.status = "failed"

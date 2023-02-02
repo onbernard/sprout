@@ -22,3 +22,8 @@ Another stupid library named after a vegetable.
 - In memory, on disk memory
 - Add proper tests
 - Add generic typing
+- Better logging
+- Communication with generator tasks ? i.e. via yield
+- Make a then function
+- Set failure protocols
+- Add a watch function to task that returns a monitor

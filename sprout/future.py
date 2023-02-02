@@ -38,7 +38,7 @@ class Arguments(BaseModel):
 class FutureModel(BaseModel):
     arguments: Arguments
     result: Any = None
-    status: Literal["pending", "completed", "failed"] = "pending"
+    status: Literal["pending", "inprogress", "completed", "failed"] = "pending"
 
     def key(self, mixin: str) -> str:
         return f"_future:{mixin}:{self.arguments.hash()}"

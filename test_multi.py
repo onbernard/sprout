@@ -4,6 +4,10 @@ from pydantic import BaseModel
 class Request(BaseModel):
     file: str = "fsq/fsq/fqsss"
 
+class ReturnVal(BaseModel):
+    param: Request = Request()
+    uwu: str = "uwu"
+
 app = Sprout()
 
 @app.task()
@@ -12,8 +16,8 @@ def afunc(a:Request) -> str:
     return a.file+"uwu"
 
 @app.task()
-def anotherfunc(a:str = "uwu"):
-    return a*2
+def anotherfunc(a:str = "uwu") -> ReturnVal:
+    return 1
 
 @app.task()
 def fails():

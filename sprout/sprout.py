@@ -9,7 +9,7 @@ from .task import Task, GeneratorTask
 class Sprout:
     def __init__(self, name: Optional[str] = None, host: str = "localhost", port: int = 6379) -> None:
         self.name = name or __file__
-        self.db = redis.Redis(host=host, port=port)
+        self.db = redis.Redis(host=host, port=port, decode_responses=True)
         self.task_index: List[Task] = []
 
     def task(self, name: Optional[str] = None):
@@ -21,7 +21,7 @@ class Sprout:
             elif inspect.isfunction(func):
                 task = Task(db=self.db, func=func, name=name, prefix=self.name)
             else:
-                raise TypeError("function or generatorfunction required")
+                raise TypeError("function or generator function required")
             self.task_index.append(task)
             return task
         return inner
@@ -31,6 +31,7 @@ class Sprout:
             *(task.run() for task in self.task_index)
         )
 
-    def __call__(self, *args: Any, **kwds: Any) -> Any:
-        print(f"Starting {len(self.task_index)} tasks: \n{'\n'.join(t.name for t in self.task_index)}")
+    def __call__(self) -> Any:
+        msg = "\n".join(t.name for t in self.task_index)
+        print(f"Starting {len(self.task_index)} tasks: \n{msg}")
         asyncio.run(self.run())

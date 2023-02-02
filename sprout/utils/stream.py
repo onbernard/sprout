@@ -5,6 +5,7 @@ import redis
 import redis.asyncio as aioredis
 from pydantic import BaseModel
 
+
 class RedisStream:
     def __init__(self, db: redis.Redis, model: Type[BaseModel], suffix: Optional[str] = None):
         self.db = db
@@ -26,14 +27,14 @@ class RedisStream:
                 count = new_count if new_count else count
 
     def get(self, index: str = "-") -> Tuple[bytes,BaseModel]:
-        return [(index, self.model.parse_raw(msg[b"val"])) for index, msg in self.db.xrange(
+        return [(index, self.model.parse_raw(msg["val"])) for index, msg in self.db.xrange(
             name = self.key,
             min = index,
             count = 1
         )][0]
 
     def range(self, min: str = "-", max: str = "+") -> List[Tuple[bytes, BaseModel]]:
-        return [(index, self.model.parse_raw(msg[b"val"])) for index, msg in self.db.xrange(
+        return [(index, self.model.parse_raw(msg["val"])) for index, msg in self.db.xrange(
             name = self.key,
             min = min,
             max = max
@@ -67,7 +68,7 @@ class AsyncRedisStream:
             )
             if items:
                 last_seen = items[0][1][-1][0]
-                new_count = yield [(idx, self.model.parse_raw(msg[b"val"])) for idx, msg in items[0][1]]
+                new_count = yield [(idx, self.model.parse_raw(msg["val"])) for idx, msg in items[0][1]]
                 count = new_count or count
             else:
                 break
@@ -108,7 +109,7 @@ class AsyncRedisStream:
                 noack = noack
             )
             if items:
-                new_count = yield [(idx, self.model.parse_raw(msg[b"val"])) for idx, msg in items[0][1]]
+                new_count = yield [(idx, self.model.parse_raw(msg["val"])) for idx, msg in items[0][1]]
                 count = new_count or count
             else:
                 break
@@ -117,8 +118,27 @@ class AsyncRedisStream:
         await self.db.xack(self.key, groupname, *ids)
 
     async def range(self, min: str = "-", max: str = "+") -> List[Tuple[bytes, BaseModel]]:
-        return [(index, self.model.parse_raw(msg[b"val"])) for index, msg in await self.db.xrange(
+        return [(index, self.model.parse_raw(msg["val"])) for index, msg in await self.db.xrange(
             name = self.key,
             min = min,
             max = max
         )]
+
+
+async def watch_stream(*stream_list: AsyncRedisStream):
+    index = {
+        stream.key: "$"
+    for stream in stream_list}
+    rev_index = {
+        stream.key: stream
+    for stream in stream_list}
+    while True:
+        items = await stream_list[0].db.xread(
+            streams = index,
+            count = 1,
+            block = 0
+        )
+        for it in items:
+            key = it[0]
+            index[key] = it[1][-1][0]
+            yield (rev_index[key], stream_list[0].model.parse_raw(it[1][-1][1]["val"]))
