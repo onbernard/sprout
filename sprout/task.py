@@ -91,14 +91,15 @@ class Task:
                 except Exception as exc:
                     print(str(exc))
                     future.status = "failed"
+                    await self.db.set(future.key(self.name), future.json())
                     await self.failed_stream.push(item)
                 else:
                     print(f"Consumer {self.name}-{consumername} with {future.arguments} completed task")
                     future.status = "completed"
                     future.result = res
+                    await self.db.set(future.key(self.name), future.json())
                     await self.completed_stream.push(item)
                 await self.pending_stream.ack("_worker", idx)
-                await self.db.set(future.key(self.name), future.json())
                 yield future
 
     async def run(self):
@@ -123,8 +124,12 @@ class Task:
         for idx, item in await self.failed_stream.range():
             yield FutureModel.parse_raw(await self.db.get(item.key))
 
+    @property
+    def streams(self):
+        return (self.pending_stream, self.inprogress_stream, self.completed_stream, self.failed_stream)
+
     async def monitor(self):
-        async for stream, item in watch_stream(self.pending_stream, self.inprogress_stream, self.completed_stream, self.failed_stream):
+        async for stream, item in watch_stream(*self.streams):
             yield (stream.key, item)
 
 
@@ -149,9 +154,11 @@ class GeneratorTask(Task):
                 except Exception as exc:
                     print(str(exc.with_traceback()))
                     future.status = "failed"
+                    await self.db.set(future.key(self.name), future.json())
                     await self.failed_stream.push(item)
                 else:
                     future.status = "completed"
+                    await self.db.set(future.key(self.name), future.json())
                     await self.completed_stream.push(item)
                 await self.pending_stream.ack("_worker", idx)
                 yield future
