@@ -1,164 +1,115 @@
-from typing import Callable, Optional, Any
+from typing import Callable, Optional, Any, Union, List, Type
 from uuid import UUID, uuid4
+import contextlib
 
 import redis.asyncio as aioredis
-from pydantic import BaseModel, validator, ValidationError
-from pydantic.decorator import ValidatedFunction
+from redis.asyncio.client import Pipeline
 
-from .future import Arguments, FutureModel, create_model_from_signature
-from .utils.stream import AsyncRedisStream, watch_stream
+from pydantic import BaseModel
 
-
-class StreamItem(BaseModel):
-    key: str
-
-
-class InvalidArguments(Exception):
-    ...
+from .future import future, StreamItem
+from .utils.stream import AsyncRedisStream, watch_streams
 
 
 class Task:
-    def __init__(self, db: aioredis.Redis, func: Callable, name: str, prefix: str) -> None:
+    def __init__(self, db: aioredis.Redis, func: Callable, prefix: str) -> None:
         self.db = db
         self.func = func
-        self.name = name
         self.prefix = prefix
-        self.validated_func = ValidatedFunction(func, None)
-        self.model = create_model_from_signature(func, prefix)
+        self.futureW = future(db, func, prefix)
         self.pending_stream = AsyncRedisStream(
             db = self.db,
             model = StreamItem,
-            prefix = prefix,
-            suffix = f"{name}:pending"
+            key = f"{prefix}:pending"
         )
         self.inprogress_stream = AsyncRedisStream(
             db = self.db,
             model = StreamItem,
-            prefix = prefix,
-            suffix = f"{name}:inprogress"
+            key = f"{prefix}:inprogress"
         )
         self.failed_stream = AsyncRedisStream(
             db = self.db,
             model = StreamItem,
-            prefix = prefix,
-            suffix = f"{name}:failed"
+            key = f"{prefix}:failed"
         )
         self.completed_stream = AsyncRedisStream(
             db = self.db,
             model = StreamItem,
-            prefix = prefix,
-            suffix = f"{name}:completed"
+            key = f"{prefix}:completed"
         )
 
-    def validate_arguments(self, args, kwargs):
-        try:
-            self.validated_func.init_model_instance(*args, **kwargs)
-        except ValidationError as exc:
-            raise InvalidArguments from exc
-
-    async def __call__(self, *args, **kwargs) -> FutureModel:
-        self.validate_arguments(args, kwargs)
-        arguments = Arguments(args=(), kwargs=self.validated_func.build_values(args, kwargs))
-        future = FutureModel(arguments=arguments)
-        if await self.db.setnx(future.key(self.name), future.json()):
-            await self.pending_stream.push(StreamItem(key=future.key(self.name)))
+    async def __call__(self, *args, **kwargs):
+        future = self.futureW(args, kwargs)
+        if await future.setnx():
+            await future.push(self.pending_stream)
         else:
-            future = FutureModel.parse_raw(await self.db.get(future.key(self.name)))
+            await future.pull()
         return future
 
-    async def poke(self, *args, **kwargs) -> Optional[FutureModel]:
-        self.validate_arguments(args, kwargs)
-        arguments = Arguments(args=(), kwargs=self.validated_func.build_values(args, kwargs))
-        future = FutureModel(arguments=arguments)
-        cached = await self.db.get(future.key(self.name))
-        return FutureModel.parse_raw(cached) if cached else None
+    async def poke(self, *args, **kwargs):
+        return await self.futureW(args, kwargs).get()
 
     async def consumer(self, consumername: Optional[str] = None):
-        consumername = consumername or f"_consumer:{uuid4().hex}"
         groupname = "_worker"
+        consumername = consumername or f"_worker:{uuid4().hex}"
         await self.pending_stream.create_group(groupname)
         await self.pending_stream.create_consumer(groupname,consumername)
-        async for event in self.pending_stream.iter_group(groupname, consumername):
+        async for event in self.pending_stream.readgroup(groupname, consumername):
             for idx, item in event:
-                future = FutureModel.parse_raw(await self.db.get(item.key))
-                future.status = "inprogress"
-                await self.db.set(future.key(self.name), future.json())
-                await self.inprogress_stream.push(item)
-                m = self.validated_func.init_model_instance(**future.arguments.kwargs)
-                print(f"Consumer {self.name}-{consumername} got {future.arguments}")
+                future = await self.futureW.from_stream(item)
+                async with future.update(self.inprogress_stream) as model:
+                    model.status = "inprogress"
+                    print(f"{self.prefix}-{consumername} GOT {model.arguments}")
                 try:
-                    res = self.validated_func.execute(m)
+                    res = future()
                 except Exception as exc:
-                    print(str(exc))
-                    future.status = "failed"
-                    await self.db.set(future.key(self.name), future.json())
-                    await self.failed_stream.push(item)
+                    print(f"{self.prefix}-{consumername} ENCOUNTERED EXCEPTION\n{exc}")
+                    async with future.update(self.failed_stream) as model:
+                        model.status = "failed"
                 else:
-                    print(f"Consumer {self.name}-{consumername} with {future.arguments} completed task")
-                    future.status = "completed"
-                    future.result = res
-                    await self.db.set(future.key(self.name), future.json())
-                    await self.completed_stream.push(item)
+                    print(f"{self.prefix}-{consumername} COMPLETED TASK")
+                    async with future.update(self.completed_stream) as model:
+                        model.status = "completed"
+                        model.result = res
                 await self.pending_stream.ack("_worker", idx)
                 yield future
 
     async def run(self):
-        async for future in self.consumer():
+        async for _ in self.consumer():
             ...
 
-    async def resolve(self, future: FutureModel) -> FutureModel:
-        return FutureModel.parse_raw(await self.db.get(future.key(self.name)))
-
-    async def unwrap(self, future: FutureModel):
-        return await self.resolve(future).result
-
-    async def all(self):
-        for idx, item in await self.pending_stream.range():
-            yield FutureModel.parse_raw(await self.db.get(item.key))
-
-    async def completed(self):
-        for idx, item in await self.completed_stream.range():
-            yield FutureModel.parse_raw(await self.db.get(item.key))
-
-    async def failed(self):
-        for idx, item in await self.failed_stream.range():
-            yield FutureModel.parse_raw(await self.db.get(item.key))
-
     @property
-    def streams(self):
+    def streams(self) -> List[AsyncRedisStream]:
         return (self.pending_stream, self.inprogress_stream, self.completed_stream, self.failed_stream)
 
-    async def monitor(self):
-        async for stream, item in watch_stream(*self.streams):
-            yield (stream.key, item)
+    async def watch(self):
+        async for _ in watch_streams(*self.streams):
+            yield _
+
 
 
 class GeneratorTask(Task):
     async def consumer(self, consumername: Optional[str] = None):
-        consumername = consumername or f"_consumer:{uuid4().hex}"
         groupname = "_worker"
+        consumername = consumername or f"_worker:{uuid4().hex}"
         await self.pending_stream.create_group(groupname)
         await self.pending_stream.create_consumer(groupname,consumername)
-        async for event in self.pending_stream.iter_group(groupname, consumername):
+        async for event in self.pending_stream.readgroup(groupname, consumername):
             for idx, item in event:
-                future = FutureModel.parse_raw(await self.db.get(item.key))
-                m = self.validated_func.init_model_instance(**future.arguments.kwargs)
-                future.status = "inprogress"
-                await self.db.set(future.key(self.name), future.json())
-                await self.inprogress_stream.push(item)
+                future = await self.futureW.from_stream(item)
+                async with future.update(self.inprogress_stream) as model:
+                    model.status = "inprogress"
+                    print(f"{self.prefix}-{consumername} GOT {model.arguments}")
                 try:
-                    for res in self.validated_func.execute(m):
-                        future.result = res
-                        await self.db.set(future.key(self.name), future.json())
-                        await self.inprogress_stream.push(item)
+                    for res in future():
+                        async with future.update(self.inprogress_stream) as model:
+                            model.result = res
                 except Exception as exc:
-                    print(str(exc.with_traceback()))
-                    future.status = "failed"
-                    await self.db.set(future.key(self.name), future.json())
-                    await self.failed_stream.push(item)
+                    print(f"{self.prefix}-{consumername} ENCOUNTERED EXCEPTION\n{exc}")
+                    async with future.update(self.failed_stream) as model:
+                        model.status = "failed"
                 else:
-                    future.status = "completed"
-                    await self.db.set(future.key(self.name), future.json())
-                    await self.completed_stream.push(item)
+                    async with future.update(self.completed_stream) as model:
+                        model.status = "completed"
                 await self.pending_stream.ack("_worker", idx)
                 yield future

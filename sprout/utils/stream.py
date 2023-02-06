@@ -1,64 +1,19 @@
 from uuid import UUID, uuid4
-from typing import Optional, Type, List, Tuple
+from typing import Optional, Type, List, Tuple, AsyncGenerator
 
-import redis
 import redis.asyncio as aioredis
+from redis.asyncio.client import Pipeline
+
 from pydantic import BaseModel
 
 
-class RedisStream:
-    def __init__(self, db: redis.Redis, model: Type[BaseModel], suffix: Optional[str] = None):
-        self.db = db
-        self.model = model
-        suffix = suffix if suffix else uuid4().hex
-        self.key = f"_stream:{suffix}"
-
-    def iter(self, count: int = 1, block: int = 0, last_seen: Optional[str] = None):
-        last_seen = last_seen if last_seen else "0"
-        while True:
-            items = self.db.xread(
-                streams = {self.key: last_seen},
-                count = count,
-                block = block
-            )
-            if items:
-                last_seen = items[0][1][-1][0]
-                new_count = yield [(idx, self.model.parse_raw(msg[b"val"])) for idx, msg in items[0][1]]
-                count = new_count if new_count else count
-
-    def get(self, index: str = "-") -> Tuple[bytes,BaseModel]:
-        return [(index, self.model.parse_raw(msg["val"])) for index, msg in self.db.xrange(
-            name = self.key,
-            min = index,
-            count = 1
-        )][0]
-
-    def range(self, min: str = "-", max: str = "+") -> List[Tuple[bytes, BaseModel]]:
-        return [(index, self.model.parse_raw(msg["val"])) for index, msg in self.db.xrange(
-            name = self.key,
-            min = min,
-            max = max
-        )]
-
-    def pop(self, index: Optional[bytes] = None) -> BaseModel:
-        index = index or "-"
-        index,val = self.get(index)
-        self.db.xdel(self.key, index)
-        return val
-
-    def push(self, msg: BaseModel) -> bytes:
-        return self.db.xadd(name=self.key, fields={"val":msg.json()})
-
-
-
 class AsyncRedisStream:
-    def __init__(self, db: aioredis.Redis, model: Type[BaseModel], prefix: str, suffix: Optional[str] = None):
+    def __init__(self, db: aioredis.Redis, model: Type[BaseModel], key: str):
         self.db = db
         self.model = model
-        suffix = suffix or uuid4().hex
-        self.key = f"{prefix}:stream:{suffix}"
+        self.key = key
 
-    async def iter(self, count: int = 1, block: int = 0, last_seen: Optional[str] = None):
+    async def read(self, count: int = 1, block: int = 0, last_seen: Optional[str] = None):
         last_seen = last_seen or "0"
         while True:
             items = await self.db.xread(
@@ -73,7 +28,9 @@ class AsyncRedisStream:
             else:
                 break
 
-    async def push(self, item: BaseModel) -> bytes:
+    async def push(self, item: BaseModel, pipe: Optional[Pipeline]) -> bytes:
+        if pipe:
+            return pipe.xadd(name=self.key, fields={"val":item.json()})
         return await self.db.xadd(name=self.key, fields={"val":item.json()})
 
     async def create_group(self, groupname: str, last_seen: Optional[str] = None, mkstream: bool = True, existok: bool = True):
@@ -97,7 +54,7 @@ class AsyncRedisStream:
             consumername = consumername,
         )
 
-    async def iter_group(self, groupname: str, consumername: str, count: int = 1, block: int = 0, noack: bool = False, last_seen: Optional[str] = None):
+    async def readgroup(self, groupname: str, consumername: str, count: int = 1, block: int = 0, noack: bool = False, last_seen: Optional[str] = None):
         last_seen = last_seen or ">"
         while True:
             items = await self.db.xreadgroup(
@@ -125,7 +82,7 @@ class AsyncRedisStream:
         )]
 
 
-async def watch_stream(*stream_list: AsyncRedisStream):
+async def watch_streams(*stream_list: AsyncRedisStream) -> AsyncGenerator[Tuple[AsyncRedisStream,BaseModel], None]:
     index = {
         stream.key: "$"
     for stream in stream_list}

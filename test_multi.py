@@ -1,34 +1,28 @@
 from sprout.sprout import Sprout
 from pydantic import BaseModel
+from typing import Optional
+from uuid import UUID, uuid4
 
 class Request(BaseModel):
-    file: str = "fsq/fsq/fqsss"
-
-class ReturnVal(BaseModel):
-    param: Request = Request()
-    uwu: str = "uwu"
+    id: UUID = uuid4()
 
 app = Sprout()
 
 @app.task()
-def afunc(a:Request) -> str:
-    print(a)
-    return a.file+"uwu"
-
-@app.task()
-def anotherfunc(a:str = "uwu") -> ReturnVal:
-    return 1
+def afunc(a: Optional[UUID] = None) -> Request:
+    a = a or uuid4()
+    return Request(id = a)
 
 @app.task()
 def fails():
-    raise Exception("lol")
-
+    raise Exception
 
 @app.task()
-def infinite(what:str):
+def infinite(a: Optional[UUID] = None):
+    a = a or uuid4()
     i = 0
     while True:
-        yield f"{what} {i}"
+        yield f"{a.hex} {i}"
         i += 1
 
 if __name__=="__main__":

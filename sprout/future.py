@@ -1,57 +1,128 @@
-from typing import Any, Literal, Hashable, Dict, Tuple, Callable, Optional, Type, Generic, TypeVar, get_type_hints
-from uuid import UUID, uuid4
-from collections import namedtuple
+from typing import Any, Literal, Callable, Optional, Type, Generic, TypeVar, AsyncGenerator, Dict, get_type_hints
 from hashlib import md5
+import inspect
+import contextlib
 
-from pydantic import BaseModel
+import redis.asyncio as aioredis
+from redis.asyncio.client import Pipeline
+
+from pydantic import BaseModel, create_model
 from pydantic.generics import GenericModel
 from pydantic.decorator import ValidatedFunction
 
-class Kwargs(dict):
-    @classmethod
-    def __get_validators__(cls):
-        yield cls.validate
+from .utils.stream import AsyncRedisStream
 
-    @classmethod
-    def validate(cls, v):
-        return cls(v)
+# TODO : always check consistency between FutureT and inner class of mk_future_model
+
+_ArgsT = TypeVar("_ArgsT", bound=Type[BaseModel])
+_ResT = TypeVar("_ResT")
 
 
-class Args(tuple):
-    @classmethod
-    def __get_validators__(cls):
-        yield cls.validate
-
-    @classmethod
-    def validate(cls, v):
-        return cls(v)
-
-
-class Arguments(BaseModel):
-    args: Args
-    kwargs: Kwargs
-
-    def hash(self) -> str:
-        return md5(self.json().encode()).hexdigest()
-
-
-class FutureModel(BaseModel):
-    arguments: Arguments
-    result: Any = None
+class FutureModel(GenericModel, Generic[_ArgsT, _ResT]):
+    arguments: _ArgsT
+    result: Optional[_ResT] = None
     status: Literal["pending", "inprogress", "completed", "failed"] = "pending"
 
-    def key(self, mixin: str) -> str:
-        return f"_future:{mixin}:{self.arguments.hash()}"
+    @property
+    def key(self) -> str:
+        raise NotImplementedError
+
+    @property
+    def kwargs(self) -> Dict:
+        raise NotImplementedError
+
+    @classmethod
+    def build_model(cls, args, kwargs) -> "FutureModel":
+        raise NotImplementedError
 
 
-def create_model_from_signature(func: Callable, prefix: str):
+def mk_args_model(func: Callable) -> Type[BaseModel]:
+    type_index = {}
+    for name, param in inspect.signature(func).parameters.items():
+        annotation = param.annotation if param.annotation != inspect._empty else Any
+        default = param.default if param.default != inspect._empty else ...
+        type_index[name] = (annotation, default)
+    return create_model("Args", **type_index)
+
+
+def mk_future_model(func: Callable, prefix: str) -> FutureModel:
+    args_model = mk_args_model(func)
+    result_type = get_type_hints(func).get("return") or Any
     validated_function = ValidatedFunction(func, None)
-    argT = validated_function.model
-    retT = Optional[get_type_hints(func).get("return")] or Any
-    class CustomFuture(BaseModel):
-        arguments: argT
-        result: retT = None
-        status: Literal["pending", "completed", "failed"] = "pending"
-        def key(self, mixin: str) -> str:
-            return f"{prefix}:_future:{mixin}:{md5(self.arguments.json().encode()).hexdigest()}"
-    return CustomFuture
+    class Future(FutureModel[args_model, result_type], Generic[_ArgsT, _ResT]):
+        @property
+        def key(self) -> str:
+            return f"{prefix}:{md5(self.arguments.json().encode()).hexdigest()}"
+        @property
+        def kwargs(self) -> Dict:
+            return dict(self.arguments)
+        @classmethod
+        def build_model(cls, args, kwargs) -> "Future":
+            return cls(arguments=args_model(**validated_function.build_values(args, kwargs)))
+    return Future
+
+
+class StreamItem(BaseModel):
+    key: str
+
+
+def future(db: aioredis.Redis, func: Callable, prefix: str):
+    future_model = mk_future_model(func, prefix)
+    class Future:
+        def __init__(self, args, kwargs, future: Optional[future_model] = None) -> None:
+            nonlocal db, future_model
+            self.future = future or future_model.build_model(args, kwargs)
+            self.stream_item = StreamItem(key=self.future.key)
+            self.stream = AsyncRedisStream(db, StreamItem, f"{self.future.key}:stream")
+
+        @classmethod
+        async def from_stream(cls, item: StreamItem) -> "Future":
+            nonlocal db
+            return cls(None, None, future_model.parse_raw(await db.get(item.key)))
+
+        @property
+        def key(self) -> str:
+            return self.future.key
+
+        async def get(self) -> Optional[future_model]:
+            nonlocal db
+            cached = await db.get(self.key)
+            return future_model.parse_raw(cached) if cached else None
+
+        async def set(self, pipe: Optional[Pipeline] = None):
+            nonlocal db
+            if pipe:
+                return pipe.set(self.key, self.future.json())
+            return await db.set(self.key, self.future.json())
+
+        async def setnx(self) -> bool:
+            nonlocal db
+            return await db.setnx(self.key, self.future.json())
+
+        async def pull(self) -> future_model:
+            nonlocal db
+            cached = future_model.parse_raw(await db.get(self.key))
+            self.future = cached
+            return cached
+
+        async def push(self, *streams: AsyncRedisStream):
+            nonlocal db
+            pipe = db.pipeline()
+            await self.set(pipe)
+            await self.stream.push(self.stream_item, pipe)
+            for stream in streams:
+                await stream.push(self.stream_item, pipe)
+            await pipe.execute()
+
+        @contextlib.asynccontextmanager
+        async def update(self, *streams: AsyncRedisStream) -> AsyncGenerator[future_model, None]:
+            nonlocal db
+            try:
+                yield self.future
+            finally:
+                await self.push(*streams)
+
+        def __call__(self):
+            nonlocal func
+            return func(**self.future.kwargs)
+    return Future
