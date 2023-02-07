@@ -42,9 +42,7 @@ class Task:
         future = self.futureW(args, kwargs)
         if await future.setnx():
             await future.push(self.pending_stream)
-        else:
-            await future.pull()
-        return future
+        return await future.get()
 
     async def poke(self, *args, **kwargs):
         return await self.futureW(args, kwargs).get()
@@ -85,6 +83,10 @@ class Task:
     async def watch(self):
         async for _ in watch_streams(*self.streams):
             yield _
+
+    async def all(self):
+        for idx, item in await self.pending_stream.range():
+            yield (await self.futureW.from_stream(item)).future
 
 
 

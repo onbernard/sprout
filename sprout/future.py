@@ -13,8 +13,9 @@ from pydantic.decorator import ValidatedFunction
 from .utils.stream import AsyncRedisStream
 
 # TODO : always check consistency between FutureT and inner class of mk_future_model
+# same for Future and FutureWrapper
 
-_ArgsT = TypeVar("_ArgsT", bound=Type[BaseModel])
+_ArgsT = TypeVar("_ArgsT", bound=BaseModel)
 _ResT = TypeVar("_ResT")
 
 
@@ -65,10 +66,38 @@ def mk_future_model(func: Callable, prefix: str) -> FutureModel:
 class StreamItem(BaseModel):
     key: str
 
+class Future:
+    def __init__(self, args, kwargs, future: Optional[FutureModel] = None):
+        self.future: FutureModel
+        self.stream_item: StreamItem
+        self.stream: AsyncRedisStream
+    @classmethod
+    async def from_stream(cls, item: StreamItem) -> "Future":
+        raise NotImplementedError
+    @classmethod
+    async def from_key(cls, key: str) -> "Future":
+        raise NotImplementedError
+    @property
+    def key(self) -> str:
+        raise NotImplementedError
+    async def get(self) -> Optional[FutureModel]:
+        raise NotImplementedError
+    async def set(self, pipe: Optional[Pipeline] = None):
+        raise NotImplementedError
+    async def setnx(self) -> bool:
+        raise NotImplementedError
+    async def pull(self) -> FutureModel:
+        raise NotImplementedError
+    async def push(self, *streams: AsyncRedisStream):
+        raise NotImplementedError
+    async def update(self, *streams: AsyncRedisStream):
+        raise NotImplementedError
+    def __call__(self):
+        raise NotImplementedError
 
-def future(db: aioredis.Redis, func: Callable, prefix: str):
+def future(db: aioredis.Redis, func: Callable, prefix: str) -> Type[Future]:
     future_model = mk_future_model(func, prefix)
-    class Future:
+    class FutureWrapper:
         def __init__(self, args, kwargs, future: Optional[future_model] = None) -> None:
             nonlocal db, future_model
             self.future = future or future_model.build_model(args, kwargs)
@@ -76,9 +105,14 @@ def future(db: aioredis.Redis, func: Callable, prefix: str):
             self.stream = AsyncRedisStream(db, StreamItem, f"{self.future.key}:stream")
 
         @classmethod
-        async def from_stream(cls, item: StreamItem) -> "Future":
+        async def from_stream(cls, item: StreamItem) -> "FutureWrapper":
             nonlocal db
             return cls(None, None, future_model.parse_raw(await db.get(item.key)))
+
+        @classmethod
+        async def from_key(cls, key: str) -> "FutureWrapper":
+            nonlocal db
+            return cls(None, None, future_model.parse_raw(await db.get(key)))
 
         @property
         def key(self) -> str:
@@ -125,4 +159,4 @@ def future(db: aioredis.Redis, func: Callable, prefix: str):
         def __call__(self):
             nonlocal func
             return func(**self.future.kwargs)
-    return Future
+    return FutureWrapper
