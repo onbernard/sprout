@@ -1,8 +1,7 @@
 from typing import Callable, Optional, Any, Union, List, Type
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import redis.asyncio as aioredis
-
 
 from .future import StreamModel, Future, make_future
 from .utils.stream import AsyncRedisStream, watch_streams
@@ -39,11 +38,7 @@ class Task:
         future = self.future_T(args, kwargs)
         if await future.setnx():
             await future.push(self.pending_stream)
-        await future.pull()
-        return future
-
-    async def poke(self, *args, **kwargs) -> Optional[Future]:
-        return await self.future_T(args, kwargs).get()
+        return await future.pull()
 
     async def consumer(self, consumername: Optional[str] = None):
         groupname = "_worker"
@@ -67,16 +62,16 @@ class Task:
                 yield future
 
     async def run(self):
-        async for _ in self.consumer():
+        async for turfu in self.consumer():
             ...
 
     @property
     def streams(self) -> List[AsyncRedisStream]:
-        return (self.pending_stream, self.inprogress_stream, self.completed_stream, self.failed_stream)
+        return [self.pending_stream, self.inprogress_stream, self.completed_stream, self.failed_stream]
 
     async def watch(self):
-        async for _ in watch_streams(*self.streams):
-            yield _
+        async for stream, stream_model in watch_streams(*self.streams):
+            yield self.future_T.from_stream(stream_model)
 
     async def all(self):
         for idx, item in await self.pending_stream.range():

@@ -1,42 +1,56 @@
-import sys
-
 logo = """
-                                                                                                                     
-                                                                                                                     
-   SSSSSSSSSSSSSSS                                                                                     tttt          
- SS:::::::::::::::S                                                                                 ttt:::t          
-S:::::SSSSSS::::::S                                                                                 t:::::t          
-S:::::S     SSSSSSS                                                                                 t:::::t          
-S:::::S            ppppp   ppppppppp   rrrrr   rrrrrrrrr      ooooooooooo   uuuuuu    uuuuuu  ttttttt:::::ttttttt    
-S:::::S            p::::ppp:::::::::p  r::::rrr:::::::::r   oo:::::::::::oo u::::u    u::::u  t:::::::::::::::::t    
- S::::SSSS         p:::::::::::::::::p r:::::::::::::::::r o:::::::::::::::ou::::u    u::::u  t:::::::::::::::::t    
-  SS::::::SSSSS    pp::::::ppppp::::::prr::::::rrrrr::::::ro:::::ooooo:::::ou::::u    u::::u  tttttt:::::::tttttt    
-    SSS::::::::SS   p:::::p     p:::::p r:::::r     r:::::ro::::o     o::::ou::::u    u::::u        t:::::t          
-       SSSSSS::::S  p:::::p     p:::::p r:::::r     rrrrrrro::::o     o::::ou::::u    u::::u        t:::::t          
-            S:::::S p:::::p     p:::::p r:::::r            o::::o     o::::ou::::u    u::::u        t:::::t          
-            S:::::S p:::::p    p::::::p r:::::r            o::::o     o::::ou:::::uuuu:::::u        t:::::t    tttttt
-SSSSSSS     S:::::S p:::::ppppp:::::::p r:::::r            o:::::ooooo:::::ou:::::::::::::::uu      t::::::tttt:::::t
-S::::::SSSSSS:::::S p::::::::::::::::p  r:::::r            o:::::::::::::::o u:::::::::::::::u      tt::::::::::::::t
-S:::::::::::::::SS  p::::::::::::::pp   r:::::r             oo:::::::::::oo   uu::::::::uu:::u        tt:::::::::::tt
- SSSSSSSSSSSSSSS    p::::::pppppppp     rrrrrrr               ooooooooooo       uuuuuuuu  uuuu          ttttttttttt  
-                    p:::::p                                                                                          
-                    p:::::p                                                                                          
-                   p:::::::p                                                                                         
-                   p:::::::p                                                                                         
-                   p:::::::p                                                                                         
-                   ppppppppp                                                                                         
-                                                                                                                     
+_____/\\\\\\\\\\\_________________________________________________________________________        
+ ___/\\\/////////\\\_______________________________________________________________________       
+  __\//\\\______\///____/\\\\\\\\\________________________________________________/\\\______      
+   ___\////\\\__________/\\\/////\\\__/\\/\\\\\\\______/\\\\\_____/\\\____/\\\__/\\\\\\\\\\\_     
+    ______\////\\\______\/\\\\\\\\\\__\/\\\/////\\\___/\\\///\\\__\/\\\___\/\\\_\////\\\////__    
+     _________\////\\\___\/\\\//////___\/\\\___\///___/\\\__\//\\\_\/\\\___\/\\\____\/\\\______   
+      __/\\\______\//\\\__\/\\\_________\/\\\_________\//\\\__/\\\__\/\\\___\/\\\____\/\\\_/\\__  
+       _\///\\\\\\\\\\\/___\/\\\_________\/\\\__________\///\\\\\/___\//\\\\\\\\\_____\//\\\\\___ 
+        ___\///////////_____\///__________\///_____________\/////______\/////////_______\/////____
 """
 
+from typing import List
+import sys
+import time
+import asyncio
 import typer
+import sys
+import importlib
+from rich import print as pprint
+from rich import box
+from rich.console import Console
+from rich.live import Live
+from rich.table import Table
+
+from .sprout import Sprout
+from .sprout import Task
+
+typer_app = typer.Typer()
 
 
-def hello(name: str):
-    print(f"Hello {name}")
+
+@typer_app.command()
+def worker(cmd: str, path: str):
+    try:
+        module_name, app_name = path.split(":")
+    except ValueError:
+        raise typer.BadParameter("worker command expect a path of the form module.submodule..:app")
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError:
+        raise typer.BadParameter(f"module {module_name} cannot be found")
+    try:
+        app = getattr(module, app_name)
+    except AttributeError:
+        raise typer.BadParameter(f"module {module_name} does not contain the attribute {app_name}")
+    if not isinstance(app, Sprout):
+        raise typer.BadParameter(f"atrribute {app_name} of module {module_name} is not a Sprout instance")
+    app()
+
 
 def main():
-    typer.run(hello)
-
+    typer_app()
 
 if __name__ == "__main__":
     main()

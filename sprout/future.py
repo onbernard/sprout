@@ -1,153 +1,232 @@
-from typing import Any, Literal, Callable, Optional, Type, Generic, TypeVar, AsyncGenerator, Sequence, Dict, AsyncContextManager, get_type_hints
-from hashlib import md5
-import inspect
+from typing import (
+    Callable,
+    Optional,
+    Type,
+    Generic,
+    TypeVar,
+    Sequence,
+    AsyncGenerator,
+    Any,
+    Dict,
+    AsyncContextManager,
+    get_type_hints,
+)
+from abc import ABC, abstractmethod, abstractclassmethod
 import contextlib
 
-import redis.asyncio as aioredis
 from redis.asyncio.client import Pipeline
-
-from pydantic import BaseModel, create_model
-from pydantic.generics import GenericModel
-from pydantic.decorator import ValidatedFunction
+import redis.asyncio as aioredis
 
 from .utils.stream import AsyncRedisStream
-
-# TODO : always check consistency between FutureT and inner class of mk_future_model
-# same for Future and FutureWrapper
-
-_ArgsT = TypeVar("_ArgsT", bound=BaseModel)
-_ResT = TypeVar("_ResT")
+from .models import GenericFutureModel, StreamModel, make_future_model, make_args_model, _ArgsT, _ResT
 
 
-class GenericFutureModel(GenericModel, Generic[_ArgsT, _ResT]):
-    arguments: _ArgsT
-    result: Optional[_ResT] = None
-    status: Literal["pending", "inprogress", "completed", "failed"] = "pending"
-    @property
-    def key(self) -> str:
-        raise NotImplementedError
-    @property
-    def kwargs(self) -> Dict:
-        return dict(self.arguments)
-    @classmethod
-    def build_model(cls, args, kwargs) -> "GenericFutureModel":
-        raise NotImplementedError
+# TODO : always check consistency between Future and inner class of mk_future
 
-
-def mk_args_model(func: Callable) -> Type[BaseModel]:
-    type_index = {}
-    for name, param in inspect.signature(func).parameters.items():
-        annotation = param.annotation if param.annotation != inspect._empty else Any
-        default = param.default if param.default != inspect._empty else ...
-        type_index[name] = (annotation, default)
-    return create_model("Args", **type_index)
-
-
-def mk_future_model(func: Callable, prefix: str) -> Type[GenericFutureModel]:
-    args_model = mk_args_model(func)
-    result_type = get_type_hints(func).get("return") or Any
-    validated_function = ValidatedFunction(func, None)
-    class FutureModel(GenericFutureModel[args_model, result_type], Generic[_ArgsT, _ResT]):
-        @property
-        def key(self) -> str:
-            return f"{prefix}:{md5(self.arguments.json().encode()).hexdigest()}"
-        @classmethod
-        def build_model(cls, args, kwargs) -> "Future":
-            return cls(arguments=args_model(**validated_function.build_values(args, kwargs)))
-    return FutureModel
-
-
-class StreamModel(BaseModel):
-    key: str
 
 _FutureModelT = TypeVar("_FutureModelT", bound=GenericFutureModel)
 
-class Future(Generic[_FutureModelT]):
-    def __init__(self, args: Sequence, kwargs: Dict, future_model: Optional[GenericFutureModel[_ArgsT, _ResT]] = None):
-        self.future_model: GenericFutureModel[_ArgsT, _ResT]
+
+class Future(ABC, Generic[_FutureModelT,_ArgsT,_ResT]):
+    """Represent a task call"""
+    def __init__(self, args: Optional[Sequence], kwargs: Optional[Dict], future_model: Optional[GenericFutureModel] = None):
+        self.future_model: _FutureModelT
         self.stream_model: StreamModel
         self.stream: AsyncRedisStream
-    @classmethod
-    async def from_stream(cls, stream_model: StreamModel) -> "Future[_ArgsT, _ResT]":
-        raise NotImplementedError
-    @classmethod
-    async def from_key(cls, key: str) -> "Future[_ArgsT, _ResT]":
-        raise NotImplementedError
+
     @property
-    def arguments(self):
+    def arguments(self) -> _ArgsT:
+        """Pydantic model containing the arguments of the function call"""
         return self.future_model.arguments
+
     @property
-    def result(self):
+    def result(self) -> Optional[_ResT]:
+        """Result of the function call"""
         return self.future_model.result
+
+    @result.setter # type: ignore
+    def result(self, result):
+        self.future_model.result = result
+
     @property
     def status(self):
+        """Status of the function call"""
         return self.future_model.status
-    @property
-    def kwargs(self):
-        return self.future_model.kwargs
+
+    @status.setter # type: ignore
+    def status(self, status):
+        self.future_model.status = status
+
+    def kwargs(self) -> Dict:
+        """Return dictionary with the function arguments
+
+        Returns:
+            Dict: Dictionary with the function arguments
+        """
+        return self.future_model.kwargs()
+
     @property
     def key(self) -> str:
+        """Value used as the redis key"""
         return self.future_model.key
+
+    async def watch(self) -> AsyncGenerator["Future", None]:
+        """Yield and update self every time an event is publised on the future stream
+
+        Yields:
+            Future: Self
+        """
+        async for _ in self.stream.read():
+            await self.pull()
+            yield self
+
+    @abstractclassmethod
+    async def from_stream(cls, stream_model: StreamModel) -> "Future[_FutureModelT, _ArgsT, _ResT]":
+        """Construct a class instance from a stream item
+
+        Args:
+            stream_model (StreamModel): A stream item
+
+        Returns:
+            Future[_FutureModelT, _ArgsT, _ResT]: The class instance referenced by the stream item
+        """
+        raise NotImplementedError
+    @abstractclassmethod
+    async def from_key(cls, key: str) -> "Future[_FutureModelT, _ArgsT, _ResT]":
+        """Construct a class instance from a key
+
+        Args:
+            key (str): A redis key
+
+        Returns:
+            Future[_FutureModelT, _ArgsT, _ResT]: The class instace referenced by the stream item
+        """
+        raise NotImplementedError
+    @abstractmethod
+    def __call__(self):
+        """Call the function with the arguments
+        """
+        raise NotImplementedError
+    @abstractmethod
     async def get(self) -> Optional[_FutureModelT]:
+        """Get the future in the redis db if it exists, None otherwise
+
+        Returns:
+            Optional[_FutureModelT[_ArgsT, _ResT]]: The future model if it is the db, None otherwise
+        """
         raise NotImplementedError
-    async def set(self, pipe: Optional[Pipeline] = None):
+    @abstractmethod
+    async def set(self, pipe: Optional[Pipeline] = None) -> None:
+        """Set the future in the redis db
+
+        Args:
+            pipe (Optional[Pipeline], optional): An optional pipe. Defaults to None.
+        """
         raise NotImplementedError
+    @abstractmethod
     async def setnx(self) -> bool:
+        """Set the future in the redis db if it does not exists.
+
+        Returns:
+            bool: True if the key was set, false otherwise
+        """
         raise NotImplementedError
-    async def pull(self) -> _FutureModelT:
+    @abstractmethod
+    async def pull(self) -> "Future[_FutureModelT, _ArgsT, _ResT]":
+        """Get the future in the redis db and update the instance attributes accordingly
+
+        Returns:
+            Future[_FutureModelT, _ArgsT, _ResT]: Self
+        """
         raise NotImplementedError
+    @abstractmethod
     async def push(self, *streams: AsyncRedisStream) -> None:
+        """Set the future in the redis db, publish to self and provided streams
+        """
         raise NotImplementedError
-    async def update(self, *streams: AsyncRedisStream) -> AsyncContextManager[_FutureModelT]:
+    @abstractmethod
+    async def update(self, *streams: AsyncRedisStream) -> AsyncContextManager["Future[_FutureModelT, _ArgsT, _ResT]"]:
+        """Asynchronous context manager that returns itself and push to the db afterward
+
+        Args:
+            streams (AsyncRedisStream): Streams where to push the changes
+        """
         raise NotImplementedError
-    async def publish_progress(self, result, *streams: AsyncRedisStream) -> None:
+    @abstractmethod
+    async def publish_progress(self, result: _ResT, *streams: AsyncRedisStream) -> None:
+        """Set result and status to inprogress in the db
+
+        Args:
+            result (_ResT): Result to set
+            streams (AsyncRedisStream): Streams where to push the changes
+        """
         raise NotImplementedError
+    @abstractmethod
     async def publish_failure(self, *streams: AsyncRedisStream) -> None:
+        """Set status to failed in the db
+
+        Args:
+            streams (AsyncRedisStream): Streams where to push the changes
+        """
         raise NotImplementedError
-    async def publish_completion(self, result, *streams: AsyncRedisStream) -> None:
-        raise NotImplementedError
-    def __call__(self) -> _ResT:
+    @abstractclassmethod
+    async def publish_completion(self, result: _ResT, *streams: AsyncRedisStream) -> None:
+        """Set result and status to completed in the db
+
+        Args:
+            result (_ResT): Result to set
+            streams (AsyncRedisStream): Streams where to push the changes
+        """
         raise NotImplementedError
 
+
+
 def make_future(db: aioredis.Redis, func: Callable, prefix: str) -> Type[Future]:
-    future_model_T = mk_future_model(func, prefix)
-    class FutureWrapper(Future):
-        def __init__(self, args, kwargs, future_model: Optional[future_model_T] = None) -> None:
+    future_model_T = make_future_model(func, prefix)
+    args_T = make_args_model(func)
+    res_T = get_type_hints(func).get("return") or Any
+
+    class FutureWrapper(Future[_FutureModelT, _ArgsT, _ResT]):
+        def __init__(self, args: Optional[Sequence], kwargs: Optional[Dict], future_model: Optional[_FutureModelT] = None):
             nonlocal db, func, prefix, future_model_T
-            self.future_model = future_model or future_model_T.build_model(args, kwargs)
+            self.future_model = future_model or future_model_T.build_model(args, kwargs) # type: ignore
             self.stream_model = StreamModel(key=self.future_model.key)
             self.stream = AsyncRedisStream(db, StreamModel, f"{self.future_model.key}:stream")
 
         @classmethod
-        async def from_stream(cls, stream_model: StreamModel) -> "FutureWrapper[future_model_T]":
+        async def from_stream(cls, stream_model: StreamModel) -> "FutureWrapper[_FutureModelT, _ArgsT, _ResT]": # type: ignore
             nonlocal db
-            return cls(None, None, future_model_T.parse_raw(await db.get(stream_model.key)))
+            return cls(None, None, future_model_T.parse_raw(await db.get(stream_model.key))) # type: ignore
 
         @classmethod
-        async def from_key(cls, key: str) -> "FutureWrapper[future_model_T]":
+        async def from_key(cls, key: str) -> "FutureWrapper[_FutureModelT, _ArgsT, _ResT]": # type: ignore
             nonlocal db
-            return cls(None, None, future_model_T.parse_raw(await db.get(key)))
+            return cls(None, None, future_model_T.parse_raw(await db.get(key))) # type: ignore
 
-        async def get(self) -> Optional[future_model_T]:
+        def __call__(self):
+            nonlocal func
+            return func(**self.kwargs())
+
+        async def get(self) -> Optional[_FutureModelT]:
             nonlocal db
             cached = await db.get(self.key)
-            return future_model_T.parse_raw(cached) if cached else None
+            return future_model_T.parse_raw(cached) if cached else None # type: ignore
 
-        async def set(self, pipe: Optional[Pipeline] = None):
+        async def set(self, pipe: Optional[Pipeline] = None) -> None:
             nonlocal db
             if pipe:
                 return pipe.set(self.key, self.future_model.json())
-            return await db.set(self.key, self.future_model.json())
+            await db.set(self.key, self.future_model.json())
 
         async def setnx(self) -> bool:
             nonlocal db
             return await db.setnx(self.key, self.future_model.json())
 
-        async def pull(self) -> future_model_T:
+        async def pull(self) -> "Future[_FutureModelT, _ArgsT, _ResT]":
             nonlocal db
-            cached = future_model_T.parse_raw(await db.get(self.key))
-            self.future_model = cached
-            return cached
+            cached = future_model_T.parse_raw(await db.get(self.key)) # type: ignore
+            self.future_model = cached # type: ignore
+            return self
 
         async def push(self, *streams: AsyncRedisStream) -> None:
             nonlocal db
@@ -159,30 +238,27 @@ def make_future(db: aioredis.Redis, func: Callable, prefix: str) -> Type[Future]
             await pipe.execute()
 
         @contextlib.asynccontextmanager
-        async def update(self, *streams: AsyncRedisStream):
+        async def update(self, *streams: AsyncRedisStream): # type: ignore
             nonlocal db
             try:
-                yield self.future_model
+                yield self
             finally:
                 await self.push(*streams)
 
-        def __call__(self):
-            nonlocal func
-            return func(**self.kwargs)
-
-        async def publish_progress(self, result, *streams: AsyncRedisStream) -> None:
-            async with self.update(*streams) as model:
-                model.status = "inprogress"
+        async def publish_progress(self, result: _ResT, *streams: AsyncRedisStream) -> None:
+            async with self.update(*streams) as future:
+                future.status = "inprogress"
                 if result:
-                    model.result = result
+                    future.result = result
 
         async def publish_failure(self, *streams: AsyncRedisStream) -> None:
-            async with self.update(*streams) as model:
-                model.status = "failed"
+            async with self.update(*streams) as future:
+                future.status = "failed"
 
-        async def publish_completion(self, result, *streams: AsyncRedisStream) -> None:
-            async with self.update(*streams) as model:
-                model.status = "completed"
+        async def publish_completion(self, result: _ResT, *streams: AsyncRedisStream) -> None: # type: ignore
+            async with self.update(*streams) as future:
+                future.status = "completed"
                 if result:
-                    model.result = result
-    return FutureWrapper
+                    future.result = result
+
+    return FutureWrapper[future_model_T, args_T, res_T] # type: ignore

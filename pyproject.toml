@@ -22,4 +22,4 @@ requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.scripts]
-sprout-run = "sprout.__main__:main"
+sprout = "sprout.__main__:main"
