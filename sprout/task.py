@@ -1,5 +1,6 @@
-from typing import Callable, Optional, Any, Union, List, Type
+from typing import Callable, Optional, List
 from uuid import uuid4
+import asyncio
 
 import redis.asyncio as aioredis
 
@@ -18,16 +19,19 @@ class Task:
             model = StreamModel,
             key = f"{prefix}:pending"
         )
+        self.inprogress_queue: asyncio.Queue =  asyncio.Queue()
         self.inprogress_stream = AsyncRedisStream(
             db = self.db,
             model = StreamModel,
             key = f"{prefix}:inprogress"
         )
+        self.failed_queue: asyncio.Queue = asyncio.Queue()
         self.failed_stream = AsyncRedisStream(
             db = self.db,
             model = StreamModel,
             key = f"{prefix}:failed"
         )
+        self.completed_queue: asyncio.Queue = asyncio.Queue()
         self.completed_stream = AsyncRedisStream(
             db = self.db,
             model = StreamModel,
@@ -48,16 +52,19 @@ class Task:
         async for event in self.pending_stream.readgroup(groupname, consumername):
             for idx, item in event:
                 future = await self.future_T.from_stream(item)
-                print(f"{self.prefix}-{consumername} GOT TASK {future.arguments}")
-                await future.publish_progress(None, self.inprogress_stream)
+                await asyncio.gather(
+                    future.publish_progress(None, self.inprogress_stream),
+                    self.inprogress_queue.put(future))
                 try:
                     res = future()
                 except Exception as exc:
-                    print(f"{self.prefix}-{consumername} ENCOUNTERED EXCEPTION\n{exc}")
-                    await future.publish_failure(self.failed_stream)
+                    await asyncio.gather(
+                        future.publish_failure(self.failed_stream),
+                        self.failed_queue.put(future))
                 else:
-                    print(f"{self.prefix}-{consumername} COMPLETED TASK")
-                    await future.publish_completion(res, self.completed_stream)
+                    await asyncio.gather(
+                        future.publish_completion(res, self.completed_stream),
+                        self.completed_queue.put(future))
                 await self.pending_stream.ack("_worker", idx)
                 yield future
 
@@ -88,15 +95,21 @@ class GeneratorTask(Task):
         async for event in self.pending_stream.readgroup(groupname, consumername):
             for idx, item in event:
                 future = await self.future_T.from_stream(item)
-                await future.publish_progress(self.inprogress_stream)
-                print(f"{self.prefix}-{consumername} GOT TASK {future.arguments}")
+                await asyncio.gather(
+                    future.publish_progress(None, self.inprogress_stream),
+                    self.inprogress_queue.put(future))
                 try:
                     for res in future():
-                        await future.publish_progress(res, self.inprogress_stream)
+                        await asyncio.gather(
+                            future.publish_progress(res, self.inprogress_stream),
+                            self.inprogress_queue.put(future))
                 except Exception as exc:
-                    print(f"{self.prefix}-{consumername} ENCOUNTERED EXCEPTION\n{exc}")
-                    await future.publish_failure(self.failed_stream)
+                    await asyncio.gather(
+                        future.publish_failure(self.failed_stream),
+                        self.failed_queue.put(future))
                 else:
-                    await future.publish_completion(self.completed_stream)
+                    await asyncio.gather(
+                        future.publish_completion(None, self.completed_stream),
+                        self.completed_queue.put(future))
                 await self.pending_stream.ack("_worker", idx)
                 yield future
